@@ -11,6 +11,8 @@
 
 #define BEEPDEV_CNT             1
 #define BEEPDEV_NAME            "beep"
+#define BEEP_ON                 1
+#define BEEP_OFF                0
 
 struct beep_device {
         dev_t devid;
@@ -20,16 +22,64 @@ struct beep_device {
         struct class *class;
         struct device *device;
         struct device_node *nd;
-        int beep;
+        int beep_gpio;
 };
 static struct beep_device beep_dev;
 
+static int beep_open(struct inode *nd, struct file *file);
+static ssize_t beep_write(struct file *file,
+                          const char __user *user,
+                          size_t size,
+                          loff_t *loff);
+static int beep_release(struct inode *nd, struct file *file);
+
 static struct file_operations beep_ops = {
         .owner = THIS_MODULE,
-        //.open = beep_open,
-        //.write = beep_write,
-        //.release = beep_close,
+        .open = beep_open,
+        .write = beep_write,
+        .release = beep_release,
 };
+
+static int beep_open(struct inode *nd, struct file *file)
+{
+        file->private_data = &beep_dev;
+        return 0;
+}
+
+static ssize_t beep_write(struct file *file,
+                          const char __user *user,
+                          size_t size,
+                          loff_t *loff)
+{
+        unsigned char buf[1] = {0};
+        struct beep_device *dev = file->private_data;
+        int ret = 0;
+
+        ret = copy_from_user(buf, user, 1);
+        if (ret != 0) {
+                ret = -EINVAL;
+                goto error;
+        }
+        if ((buf[0] != BEEP_OFF) && (buf[0] != BEEP_ON)) {
+                ret = -EINVAL;
+                goto error;
+        }
+
+        if (buf[0] == BEEP_OFF) {
+                gpio_set_value(dev->beep_gpio, 1);
+        } else if (buf[0] == BEEP_ON) {
+                gpio_set_value(dev->beep_gpio, 0);
+        }
+
+error:
+        return ret;
+}
+
+static int beep_release(struct inode *nd, struct file *file)
+{
+        file->private_data = NULL;
+        return 0;
+}
 
 static int __init beep_init(void)
 {
@@ -80,28 +130,29 @@ static int __init beep_init(void)
                 ret = -EINVAL;
                 goto fail_find_node;
         }
-        beep_dev.beep = of_get_named_gpio(beep_dev.nd, "beep-gpios", 0);
-        if (beep_dev.beep < 0) {
+        beep_dev.beep_gpio = of_get_named_gpio(beep_dev.nd, "beep-gpios", 0);
+        if (beep_dev.beep_gpio < 0) {
                 printk("get named error!\n");
                 ret = -EFAULT;
                 goto fail_get_named;
         }
-        ret = gpio_request(beep_dev.beep, "beep");
+        printk("beep-gpio num = %d\n", beep_dev.beep_gpio);
+        ret = gpio_request(beep_dev.beep_gpio, "beep");
         if (ret != 0) {
                 printk("gpio request error!\n");
                 goto fail_gpio_request;
         }
-        ret = gpio_direction_output(beep_dev.beep, 0);
+        ret = gpio_direction_output(beep_dev.beep_gpio, 1);
         if (ret != 0) {
                 printk("gpio dir output set error!\n");
                 goto fail_dir_error;
         }
-        gpio_set_value(beep_dev.beep, 1);
+        gpio_set_value(beep_dev.beep_gpio, 1);  /* default close beep */
 
         goto success;
         
 fail_dir_error:
-        gpio_free(beep_dev.beep);
+        gpio_free(beep_dev.beep_gpio);
 fail_gpio_request:
 fail_get_named:
 fail_find_node:
@@ -119,7 +170,8 @@ success:
 
 static void __exit beep_exit(void)
 {
-        gpio_free(beep_dev.beep);
+        gpio_set_value(beep_dev.beep_gpio, 1);
+        gpio_free(beep_dev.beep_gpio);
         device_destroy(beep_dev.class, beep_dev.devid);
         class_destroy(beep_dev.class);
         cdev_del(&beep_dev.c_dev);
